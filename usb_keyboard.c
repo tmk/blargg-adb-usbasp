@@ -56,15 +56,14 @@ uint8_t usbFunctionSetup( uint8_t data [8] )
 {
 	usbRequest_t const* rq = (usbRequest_t const*) data;
 
-	// TODO: does boot protocol really work? We don't change anything about our behavior.
-	static uint8_t protocol = 1; //	0=boot 1=report
-	
 	if ( (rq->bmRequestType & USBRQ_TYPE_MASK) != USBRQ_TYPE_CLASS )
 		return 0;
 	
+	static uint8_t protocol = 1; //	0=boot 1=report
+	
 	switch ( rq->bRequest )
 	{
-	case USBRQ_HID_GET_REPORT:
+	case USBRQ_HID_GET_REPORT: // perhaps also only used for boot protocol
 		usbMsgPtr = keyboard_report_;
 		return sizeof keyboard_report_;
 	
@@ -95,9 +94,6 @@ uint8_t usbFunctionSetup( uint8_t data [8] )
 	}
 }
 
-#define CONCAT_( x, y ) x##y
-#define CONCAT( x, y )	CONCAT_( x, y )
-
 void usb_init( void )
 {
 	cli();
@@ -106,8 +102,8 @@ void usb_init( void )
 	PORTD &= ~(1<<2);
 	DDRD  &= ~(1<<2);
 	
-	// Apparetly pins must be low normally
-	CONCAT(PORT,USB_CFG_IOPORTNAME) &= ~(1<<USB_CFG_DMINUS_BIT | 1<<USB_CFG_DPLUS_BIT);
+	// Apparetly USB pins must be low normally
+	USBOUT &= ~USBMASK;
 	
 	// Force USB re-enumeration in case we're being re-run while connected
 	usbDeviceDisconnect();

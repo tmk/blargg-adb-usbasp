@@ -1,3 +1,6 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
 // Uncomment if you have removed the locking mechanism from your caps lock
 //#define UNLOCKED_CAPS 1
 
@@ -20,3 +23,5 @@
 // Shortens ADB bit cells by 25% (still within spec) to reduce chance of conflict
 // with USB interrupts. Shouldn't cause any problems.
 #define ADB_REDUCED_TIME 1
+
+#endif

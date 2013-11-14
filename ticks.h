@@ -5,8 +5,8 @@
 #include <stdbool.h>
 #include <avr/io.h>
 
-enum { tclocks_per_sec = (F_CPU + 512) / 1024 };
-enum { ticks_per_sec = (tclocks_per_sec + 128) / 256 };
+enum { tclock_hz = (F_CPU + 512) / 1024 };
+enum { tick_hz = (tclock_hz + 128) / 256 };
 
 extern uint8_t ticks_;
 
