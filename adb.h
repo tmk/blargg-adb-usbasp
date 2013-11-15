@@ -31,10 +31,6 @@ void adb_host_kbd_led( uint8_t led );
 bool adb_host_psw( void );
 
 
-// Debugging
-extern unsigned char adb_debug_log [0x40];
-extern unsigned char adb_debug_pos;
-
 // Legacy support
 #define ADB_POWER       0x7F
 #define ADB_CAPS        0x39

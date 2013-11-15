@@ -1,11 +1,21 @@
-// Parses ADB bytes into modifiers and keys currently down
+// Conversion from ADB to USB, including locking caps to momentary caps USB uses
 
-#include "parse_adb.h"
+// Init ADB reading and initialize keyboard
+static void adb_usb_init( void );
+
+// Parse an ADB key press/release byte and update keyboard_modifiers and keyboard_keys.
+static void parse_adb( unsigned char raw );
+
+// Call before each ADB transaction to process previous press of caps lock.
+// True if caps lock was released and usb_keyboard_send() needs to be called.
+static bool release_caps( void );
+
+// Call periodically to update LED state
+static void handle_leds( void );
 
 #include "keymap.h"
+#include "adb.h"
 #include "usb_keyboard.h"
-
-#include "common.h"
 
 enum { max_keys = 6 };
 enum { released_mask = 0x80 };
@@ -45,7 +55,8 @@ static void parse_adb_( byte raw )
 				return;
 			}
 			
-			debug_str( "released key not in list\n" );
+			DEBUG(debug_byte( raw ));
+			DEBUG(debug_str( "released key not in list\n" ));
 		}
 		else
 		{
@@ -53,7 +64,7 @@ static void parse_adb_( byte raw )
 			// key down events when pressing lots of keys)
 			if ( *p == code )
 			{
-				debug_str( "pressed key already in list\n" );
+				DEBUG(debug_str( "pressed key already in list\n" ));
 				return;
 			}
 			
@@ -69,21 +80,21 @@ static void parse_adb_( byte raw )
 			}
 			while ( p != keyboard_keys );
 			
-			debug_str( "too many keys pressed\n" );
+			DEBUG(debug_str( "too many keys pressed\n" ));
 		}
 	}
 }
 
 #ifdef UNLOCKED_CAPS
 
-void parse_adb( byte raw )
+static void parse_adb( byte raw )
 {
 	parse_adb_( raw );
 }
 
-bool release_caps( void ) { return false; }
+static bool release_caps( void ) { return false; }
 
-void leds_changed( byte leds ) { (void) leds; }
+static void leds_changed( byte leds ) { (void) leds; }
 
 #else
 
@@ -92,7 +103,7 @@ enum { caps_mask = 2 };
 static byte caps_pressed;
 static byte caps_on;
 
-bool release_caps( void )
+static bool release_caps( void )
 {
 	if ( caps_pressed )
 	{
@@ -103,7 +114,7 @@ bool release_caps( void )
 	return false;
 }
 
-void leds_changed( byte leds )
+static void leds_changed( byte leds )
 {
 	// only update our flag when USB host changes caps LED
 	static byte prev_caps_led;
@@ -115,7 +126,7 @@ void leds_changed( byte leds )
 	}
 }
 
-void parse_adb( byte raw )
+static void parse_adb( byte raw )
 {
 	if ( (raw & 0x7F) != adb_caps )
 	{
@@ -134,3 +145,32 @@ void parse_adb( byte raw )
 }
 
 #endif
+
+static void adb_usb_init( void )
+{
+	adb_host_init();
+	_delay_ms( 100 );
+	
+	// Enable separate key codes for left/right shift/control/option keys
+	// on Apple Extended Keyboard.
+	adb_host_listen( 0x2B, 0x02, 0x03 );
+	
+	usb_init();
+	while ( !usb_configured() )
+		{ }
+}
+
+static void handle_leds( void )
+{
+	static byte leds = -1;
+	byte new_leds = keyboard_leds;
+	if ( leds != new_leds )
+	{
+		leds = new_leds;
+		leds_changed( new_leds );
+		
+		cli();
+		adb_host_kbd_led( ~new_leds & 0x07 );
+		sei();
+	}
+}

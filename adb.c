@@ -40,16 +40,6 @@ enum { adb_cmd_write = 0x28 };
 	enum { adb_cell_time = 100 };
 #endif
 
-#ifdef NDEBUG
-	#define LOG( n ) (void) (n)
-#else
-	#define LOG( n ) \
-		(void) (adb_debug_log [adb_debug_pos++ & (sizeof adb_debug_log-1)] = (n))
-	// Log of durations of pulses, for debugging.
-	byte adb_debug_log [0x40];
-	byte adb_debug_pos;
-#endif
-
 // gcc is very unreliable for inlining, so use macros
 #define data_lo() (ADB_DDR |=  data_mask)
 #define data_hi() (ADB_DDR &= ~data_mask)
@@ -74,7 +64,8 @@ static void place_bit1( void ) { place_bit( 1 ); }
 
 static void send_byte( byte data )
 {
-	for ( byte n = 8; n; n-- )
+	byte n;
+	for ( n = 8; n; n-- )
 	{
 		place_bit( data & 0x80 );
 		data <<= 1;
@@ -122,7 +113,6 @@ static byte while_data( byte us, byte data )
 		if ( !--us )
 			break;
 	}
-	LOG( us );
 	return us;
 }
 

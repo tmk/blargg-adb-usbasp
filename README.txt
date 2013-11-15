@@ -1,10 +1,17 @@
 ADB-USB adapter using USBASP board
-----------------------------------
-This project converts a USBASP ISP programmer board into an ADB-to-USB converter for using old Mac keyboards on a modern computer. The USBASP programmer can be had for under $3, and has all the components needed for a software-based USB stack. A second USBASP programmer can be used to reprogram the first.
+==================================
+This project converts a USBASP ISP programmer board into an ADB-to-USB converter for using old Mac keyboards on a modern computer. The USBASP programmer can be had for under $3, and has all the components needed for software-based USB. A second USBASP programmer can be used to reprogram the first. The code should be easily adaptable to similar hardware.
 
-This is a preliminary version and not well-tested or polished.
+This hasn't undergone much testing by others.
 
-See keymap.h for custom layouts.
+See keymap.h to customize layout.
+
+
+Features
+--------
+* Tested on M3501 (Apple Extended Keyboard II) and M0116 (Apple Keyboard).
+* Power key wakes host.
+* Needs about 3100 bytes of flash.
 
 
 Design
@@ -16,6 +23,10 @@ Design
 * The USBASP design exposes three pins that we can use: TXD and RXD on the ISP connector, and a pin on JP3 (clock select jumper). TX isn't useful for ADB because it has a 1K resistor in series, but RXD or the pin on JP3 works. So no need to physically modify the USBASP at all.
 
 * The ADB code is timing-sensitive, and the V-USB code's interrupt handler can take up to 100us. So we wait for a V-USB interrupt (by putting the CPU to sleep), then disable interrupts while we run the timing-sensitive ADB code, which takes about 3.3ms. The synchronization ensures that we don't randomly interfere with V-USB. Testing shows that this doesn't disrupt USB activity or cause USB errors (dmesg on Linux shows nothing). This also serves to limit the ADB polling rate to 125Hz (8ms period).
+
+* main.c initializes things and has main loop. This polls ADB, converts to USB report, and sends. Also handles idle updating and wake from suspend. adb_usb.h maintains list of pressed keys in report and handles locking caps key. keymap.h specifies the key layout for the ADB keyboard. adb.c handles the low-level ADB protocol. usb_keyboard.c handles the HID keyboard protocol. usbdrv/ handles the low-level USB protocol.
+
+* A good part of main.c handles optimized splitting of ADB event into USB key reports. ADB events sometimes have a key down and key up for the same key; if handled by a single report, they would cancel out, thus they must be split. So n ADB events can potentially convert to 2n USB reports. The optimizations done in handle_adb() may be overkill and removed at some point.
 
 
 Construction
@@ -71,7 +82,9 @@ ADB cable (male):
 To do
 -----
 * Test boot mode, which is apparently used by the BIOS on boot up.
-
+* Add support for tying TXD to RXD and using series 1K resistor that's on the USBASP board as a pull-up for ADB, eliminating the need for an external resistor.
+* Still seems to be reset after host suspend/resume, which e.g. resets its xmodmap on Linux.
+* Figure out why LEDs sometimes don't update during heavy typing. usbFunctionSetup() in usb_keyboard.c receives USBRQ_HID_SET_REPORT, but occasionally our usbFunctionWrite() doesn't get called.
 
 -- 
 Shay Green <gblargg@gmail.com>

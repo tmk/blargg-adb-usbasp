@@ -1,175 +1,233 @@
-// Synchronizes ADB polling with V-USB interrupts
+// Initialization, ADB polling synchronized with V-USB interrupts, power key wakeup
 
-#include "ticks.h"
-#include "wake.h"
-#include "adb.h"
-#include "parse_adb.h"
-#include "usb_keyboard.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <avr/io.h>
+#include <avr/sleep.h>
+#include <avr/pgmspace.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+
 #include "usbdrv/usbdrv.h"
 
-#include "common.h"
+typedef unsigned char byte;
+#define DEBUG( e )
+#include "config.h"
 
-// ADB polled no faster than this
-//enum { min_adb_ms = 8 }; // (125Hz)  only slightly better for M3501, but hurts others
-enum { min_adb_ms = 12 }; // (83Hz) best for M0116
+#include "adb_usb.h"
 
-static void update_leds( void )
+enum { tcnt1_hz = (F_CPU + 512) / 1024 };
+enum { wake_period = tcnt1_hz }; // once a second
+
+static void timer1_init( void )
 {
-	static byte leds = -1;
-	byte new_leds = keyboard_leds;
-	if ( leds != new_leds )
+	TCCR1B = 5<<CS10; // 1024 prescaler
+	TIMSK |= 1<<TOIE1;
+}
+
+static volatile bool wake_ignore = true; // we set this regularly in main loop
+
+// Runs once every several seconds
+ISR(TIMER1_OVF_vect)
+{
+	if ( wake_ignore )
 	{
-		leds = new_leds;
-		leds_changed( new_leds );
-		adb_host_kbd_led( ~new_leds & 0x07 );
+		wake_ignore = false;
+	}
+	else
+	{
+		// Host is in suspend, so have this ISR called more often
+		TCNT1 = -wake_period;
+	
+		uint16_t keys = adb_host_kbd_recv();
+	
+		// See if power key pressed
+		if ( (keys >> 8 & 0xFF) == 0x7F )
+		{
+			// USB SE0 to wake host
+			USBOUT &= ~USBMASK;
+			USBDDR |= USBMASK;
+			_delay_ms( 10 );
+			USBDDR &= ~USBMASK;
+			GIFR = 1<<INTF0; // clear since we probably just triggered it
+		}
 	}
 }
 
 static bool update_idle( void )
 {
-	if ( ticks_idle() )
+	// TODO: get host to actually use this mode so it can be tested
+	if ( keyboard_idle_period ) // update periodically if USB host wants it
 	{
-		// TODO: get host to actually use this mode so it can be tested
-		if ( keyboard_idle_period ) // update periodically if USB host wants it
+		enum { t1_from_idle = (tcnt1_hz * 4L + 500) / 1000 };
+		static unsigned next;
+		if ( (int) (TCNT1 - next) >= 0 )
 		{
-			enum { units_per_tick = 1000 / 4 / tick_hz };
-			
-			static byte remain; // *4 = milliseconds
-			if ( remain > units_per_tick )
-			{
-				remain -= units_per_tick;
-			}
-			else
-			{
-				remain = keyboard_idle_period;
-				return true;
-			}
+			next = TCNT1 + keyboard_idle_period * t1_from_idle;
+			return true;
 		}
 	}
 	return false;
 }
 
-static void adb_init( void )
+static bool handle_adb( void )
 {
-	adb_host_init();
+	static byte adb_extra_ = 0xFF;
 	
-	_delay_ms( 100 );
-	
-	// Enable separate key codes for left/right shift/control/option keys
-	// on Apple Extended Keyboard.
 	cli();
-	adb_host_listen( 0x2B, 0x02, 0x03 );
+	uint16_t keys = adb_host_kbd_recv();
 	sei();
+	
+	bool changed = release_caps();
+	
+	// The three potential events (0xFF=none), listed in order of occurrence
+	byte key2 = adb_extra_;  // possibly == 0xFF
+	byte key1 = keys >> 8;   // != 0xFF
+	byte key0 = keys & 0xFF; // possibly == 0xFF
+	
+	// Parse extra now
+	adb_extra_ = 0xFF;
+	if ( key2 != 0xFF )
+	{
+		parse_adb( key2 );
+		changed = true;
+	}
+	
+	// See if no new events
+	if ( keys == adb_host_nothing || keys == adb_host_error )
+		return changed;
+	
+	// For some keys (e.g. power) the same event is in both bytes
+	if ( key0 == key1 )
+		key0 = 0xFF;
+	
+	// We've got three events, some or all of which could be for the same key.
+	// In that case, we must send the updates over USB separately or lose a
+	// key press. There are an exasperating number of possible situations:
+	//
+	// Key 
+	// 210 Sends Extra
+	// ---------------
+	// -B-   B   -
+	// -BC   BC  -
+	// -Bb   B   b
+	// AB-   AB  -
+	// ABC   ABC -
+	// ABa   AB  a
+	// AaB   AB  a
+	// Aa-   A   a
+	// AaA A a   A
+	
+	// Cases are listed below where they are handled
+		
+	if ( key2 != 0xFF )
+	{
+		if ( ((key2 ^ key0) & 0x7F) == 0 )
+		{
+			// ABa   AB  a
+			// AaA A a   A
+			
+			// If both new events are same as extra key, we must send extra,
+			// first event, then save second event as new extra
+			if ( ((key2 ^ key1) & 0x7F) == 0 )
+				usb_keyboard_send();
+			
+			// Second event matches extra, so save as new extra
+			adb_extra_ = key0;
+			parse_adb( key1 );
+			return true;
+		}
+		
+		if ( ((key2 ^ key1) & 0x7F) == 0 )
+		{
+			// AaB   AB  a
+			// Aa-   A   a
+			
+			// First event matches extra, so save as new extra
+			adb_extra_ = key1;
+			if ( key0 != 0xFF )
+				parse_adb( key0 );
+			return true;
+		}
+		
+		// No matches, so extra gets merged with new events
+		// AB-   AB  -
+		// ABC   ABC -
+	}
+	// -B-   B   -
+	// -BC   BC  -
+	// -Bb   B   b
+	
+	parse_adb( key1 );
+	
+	if ( ((key1 ^ key0) & 0x7F) == 0 )
+		adb_extra_ = key0;
+	else if ( key0 != 0xFF )
+		parse_adb( key0 );
+	
+	return true;
 }
 
-static void init( void )
+// Avoid floating inputs on unused pins
+static void pullup_ports( void )
 {
-	pullup_ports();
-
-	adb_init();
-	
-	usb_init();
-	while ( !usb_configured() )
-		{ }
-
-	ticks_init();
-	wake_init();
+	DDRB  = 0;
+	PORTB = 0xFF;
+	DDRC  = 0;
+	PORTC = 0xFF;
+	DDRD  = 0;
+	PORTD = 0xFF;
 }
 
 int main( void )
 {
-	init();
+	// Reduce power usage
+	pullup_ports();
 	
-	byte prev_time = tclocks();
+	adb_usb_init();
+	timer1_init();
+	
+	byte frame = 0;
+	bool changed = false;
 	for ( ;; )
 	{
-		wake_idle();
-		update_leds();
-		
-		bool keys_changed = update_idle();
-		keys_changed |= release_caps();
-		
-		static byte extra_key;
-		if ( extra_key )
+		// Flush changes and synchronize
+		if ( usb_keyboard_poll() && changed )
 		{
-			parse_adb( extra_key );
-			extra_key = 0;
-			keys_changed = true;
-			
-			// This would make sense if USB ran faster than every 8ms. Then we'd
-			// get this extra update in without affecting ADB poll timing. Currently
-			// this would delay the next ADB poll by 8ms.
-			//usb_keyboard_send();
-			//keys_changed = false;
-			
-			// And if next ADB event is for this same key, user has exceeded the maximum
-			// rate (60Hz) and there's nothing we can do anyway. Sure, if they exceed it
-			// for only a few key presses, we could buffer them up and play them back slower,
-			// but then later keys would need to be delayed.
-		}
-		
-		// Ensure enough time has passed since last ADB
-		// +100 reduces delay so we don't wait too long. It will be rounded back up
-		// due to the opportunities occuring only every 4ms.
-		enum { min_tclocks = (long) tclock_hz * min_adb_ms / (1000 + 100) };
-		for ( ;; )
-		{
-			// Synchronize with USB interrupt
-			usb_keyboard_poll();
-			sleep();
-			if ( (byte) (tclocks() - prev_time) >= min_tclocks )
-				break;
-			
-			// Use half-interrupts for finer timing granularity
-			#ifdef ADB_REDUCED_TIME
-				_delay_us( 4000 );
-			#else
-				_delay_us( 3800 ); // don't cut it so close
-			#endif
-			if ( (byte) (tclocks() - prev_time) >= min_tclocks )
-				break;
-		}
-		prev_time = tclocks();
-		
-		// We have at most 4ms here
-		// ADB takes 3.26ms when keyboard responds (3.8ms without ADB_REDUCED_TIME)
-		cli();
-		uint16_t keys = adb_host_kbd_recv();
-		sei();
-	
-		if ( keys != adb_host_nothing && keys != adb_host_error )
-		{
-			#ifndef NDEBUG
-				debug_word( keys );
-			#endif
-			
-			byte key0 = keys >> 8;
-			byte key1 = keys & 0xFF;
-			
-			parse_adb( key0 );
-			
-			// Ignore duplicate event (some keys do this for whatever reason)
-			if ( key0 ^ key1 )
-			{
-				// key pressed and released in same event, so defer newer event
-				if ( (key0 ^ key1) == 0x80 )
-					extra_key = key1;
-				else if ( (key1 & 0x7F) != 0x7F )
-					parse_adb( key1 );
-			}
-			keys_changed = true;
-		}
-		
-		if ( keys_changed )
-		{
+			// USB is idle so do this before interrupt
 			usb_keyboard_send();
+			changed = false;
+		}
+		sleep_enable();
+		sleep_cpu();
+		byte synced_time = TCNT1L;
+		if ( changed )
+			usb_keyboard_send();
+		changed = false;
+		
+		// Poll ADB every two out of three frames
+		if ( frame <= 1 )
+		{
+			// Delay second poll by half a frame
+			enum { half_interrupt = 3800L * tcnt1_hz / 1000000 };
+			if ( frame == 1 )
+				while ( (byte) (TCNT1L - synced_time) < half_interrupt )
+					{ }
 			
-			#if 0
-			debug_byte( keyboard_modifier_keys );
-			for ( byte i = 0; i < 6; i++ )
-				debug_byte( keyboard_keys [i] );
-			debug_newline();
-			#endif
+			// Poll ADB and send any changes
+			// DO NOT use || as this will not call both funcs!
+			changed = handle_adb() | update_idle();
+			
+			frame++;
+		}
+		else
+		{
+			// Every third frame, update LEDs instead of polling ADB
+			// This also gives USB a chance to send LED updates
+			handle_leds();
+			wake_ignore = true;
+			
+			frame = 0;
 		}
 	}
 }

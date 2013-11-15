@@ -68,7 +68,7 @@ uint8_t usbFunctionSetup( uint8_t data [8] )
 		return sizeof keyboard_report_;
 	
 	case USBRQ_HID_SET_REPORT:
-		if ( rq->wLength.word != 1 ) 
+		if ( rq->wLength.word != 1 )
 			return 0;
 		return USB_NO_MSG; // causes call to usbFunctionWrite
 	
@@ -96,8 +96,6 @@ uint8_t usbFunctionSetup( uint8_t data [8] )
 
 void usb_init( void )
 {
-	cli();
-	
 	// INT0 = input with no pull-up
 	PORTD &= ~(1<<2);
 	DDRD  &= ~(1<<2);
@@ -134,5 +132,13 @@ int8_t usb_keyboard_send( void )
 	
 	// copies report so we don't have to worry about caller changing it before USB uses it
 	usbSetInterrupt( keyboard_report_, sizeof keyboard_report_ );
+	
+	#if 0
+	debug_byte( keyboard_modifier_keys );
+	for ( byte i = 0; i < 6; i++ )
+		debug_byte( keyboard_keys [i] );
+	debug_newline();
+	#endif
+	
 	return 0;
 }
